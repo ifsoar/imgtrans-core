@@ -3,196 +3,187 @@ package com.soar.analysis;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.*;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 /*
  * 文件解析工具类
  */
 public class FileAnalysisUtil {
-
-    public static SplitList split(File source, File baseDir, long maxLength, String format) throws IOException {
-        if (!source.exists()) {
-            throw new RuntimeException("source not exist:" + source.getAbsolutePath());
-        }
-        SplitList splitList = new SplitList();
-        splitList.setFormat(format);
-        splitList.setSourceLength(source.length());
-        splitList.setSourceName(source.getName());
-
-        int splitCount;
-        if (source.length() % maxLength == 0) {
-            splitCount = (int) (source.length() / maxLength);
-        } else {
-            splitCount = (int) (source.length() / maxLength) + 1;
-        }
-        splitList.setSplitCount(splitCount);
-
-        List<SplitItem> splitItems = new ArrayList<>();
-        long lengthOffset = 0;
-        for (int i = 0; i < splitCount; i++) {
-            SplitItem splitItem = new SplitItem();
-            splitItem.setIndex(i);
-            String uuid = UUID.randomUUID().toString() + "." + format;
-            splitItem.setName(uuid);
-
-            if (i != splitCount - 1) {
-                boolean status = constructImage(
-                        source,
-                        new File(baseDir.getAbsolutePath() + File.separator + uuid),
-                        format,
-                        i,
-                        lengthOffset,
-                        maxLength);
-                lengthOffset += maxLength;
-                splitItem.setLength(maxLength);
-            } else {
-                boolean status = constructImage(
-                        source,
-                        new File(baseDir.getAbsolutePath() + File.separator + uuid),
-                        format,
-                        i,
-                        lengthOffset,
-                        source.length() - lengthOffset);
-                splitItem.setLength(source.length() - lengthOffset);
+    public static Result split(File sourceFile, File dir, int limitSize, String format, String password) {
+        Result result = new Result();
+        try {
+            SplitList splitList = new SplitList();
+            splitList.setSourceName(sourceFile.getName());
+            splitList.setSourceLength(sourceFile.length());
+            splitList.setFormat(format);
+            if (password != null && password.length() > 0) {
+                splitList.setPassword(password);
             }
-
-            splitItems.add(splitItem);
+            String md5 = MD5Util.getFileMD5(sourceFile);
+            System.out.println(md5);
+            splitList.setMd5(md5);
+            int splitCount = (int) (sourceFile.length() % limitSize == 0 ? sourceFile.length() / limitSize : sourceFile.length() / limitSize + 1);
+            System.out.println(splitCount);
+            splitList.setSplitCount(splitCount);
+            FileInputStream inputStream = new FileInputStream(sourceFile);
+            splitList.setItemList(new ArrayList<>());
+            for (int i = 0; i < splitCount; i++) {
+                long startIndex = i * limitSize;
+                long length;
+                if (i == splitCount - 1) {
+                    length = sourceFile.length() - startIndex;
+                } else {
+                    length = limitSize;
+                }
+                System.out.println(i + ":" + sourceFile.length() + ":" + startIndex + ":" + length);
+                String targetName = UUIDUtil.make();
+                File targetItem = new File(dir, targetName + "." + format);
+                SplitItem item = makeItem(i, inputStream, targetItem, length, format, password);
+                splitList.getItemList().add(item);
+            }
+            inputStream.close();
+            result.splitList = splitList;
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
         }
-
-        splitList.setItemList(splitItems);
-        return splitList;
+        return result;
     }
 
-    private static boolean constructImage(File source, File target, String format, int index, long offset, long length)
-            throws IOException {
-        FileInputStream fileInputStream = new FileInputStream(source);
-        fileInputStream.skip(offset);
-        long pixelAll;
-        if (length % 3 == 0) {
-            pixelAll = length / 3;
+    private static SplitItem makeItem(int index, FileInputStream inputStream, File targetItem, long length, String format, String password) throws IOException {
+        SplitItem item = new SplitItem();
+        item.setIndex(index);
+        item.setLength(length);
+        int pixelNum = (int) ((length + 16 + 4 + 2 + 2) / 3);
+        int imgWidth, imgHeight;
+        double sqrtWidth = Math.sqrt(pixelNum);
+        if (sqrtWidth % 8 == 0) {
+            imgWidth = (int) sqrtWidth;
+            imgHeight = imgWidth;
         } else {
-            pixelAll = length / 3 + 1;
+            int t = (int) Math.ceil(sqrtWidth);
+            imgWidth = (t / 8 + 1) * 8;
+            double d = 1D * pixelNum / imgWidth;
+            imgHeight = (int) Math.ceil(d);
         }
-        int width = (int) Math.ceil(Math.sqrt(pixelAll * 1.0));
-        int height = width;
-        if (width < 4) {
-            width = 4;
-            if (pixelAll % width == 0) {
-                height = (int) (pixelAll / width);
-            } else {
-                height = (int) (pixelAll / width) + 1;
+        BufferedImage image = new BufferedImage(imgWidth, imgHeight, BufferedImage.TYPE_INT_RGB);
+        int[] pixels = new int[imgWidth];
+        byte[] data = new byte[imgWidth * 3];
+        int readSize = data.length;
+        for (int i = 0; i < imgHeight; i++) {
+            if (i == imgHeight - 1) {
+                readSize = (int) (length % data.length);
             }
+            clearData(data);
+            inputStream.read(data, 0, readSize);
+            if (password != null && password.length() > 0) {
+                encodeData(data, password);
+            }
+            if (i == imgHeight - 1) {
+                makeEndMessage(data, length, password);
+            }
+            fillPixels(data, readSize, pixels);
+            image.setRGB(0, i, imgWidth, 1, pixels, 0, imgWidth);
         }
-        BufferedImage bufferedImage = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-        int[] array = new int[width];
-        byte[] temp = new byte[width * 3];
-//        fillImageHead(array, index, length);
-//        bufferedImage.setRGB(0, 0, width, 1, array, 0, width);
-        for (int i = 0; i < height; i++) {
-            int readSize = fileInputStream.read(temp);
-            fillImageLine(temp, array);
-            bufferedImage.setRGB(0, i, width, 1, array, 0, width);
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        ImageIO.write(image, format, outputStream);
+        if (!targetItem.exists()) {
+            targetItem.createNewFile();
         }
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        ImageIO.write(bufferedImage, format, out);
-        if (!target.exists()) {
-            target.createNewFile();
-        }
-        FileOutputStream fileOutputStream = new FileOutputStream(target);
-        fileOutputStream.write(out.toByteArray());
+        FileOutputStream fileOutputStream = new FileOutputStream(targetItem);
+        fileOutputStream.write(outputStream.toByteArray());
         fileOutputStream.flush();
         fileOutputStream.close();
-        fileInputStream.close();
-        return true;
+        item.setName(targetItem.getName());
+        item.setMd5(MD5Util.getFileMD5(targetItem));
+        return item;
     }
 
-    private static void fillImageLine(byte[] temp, int[] array) {
+    private static void encodeData(byte[] data, String password) {
+        String md5 = MD5Util.stringMD5(password);
+        byte[] p = new byte[md5.length() / 2];
+        for (int i = 0; i < p.length; i++) {
+            p[i] = (byte) Integer.parseInt(md5.substring(i * 2, i * 2 + 1), 16);
+        }
+        for (int i = 0; i < data.length; i++) {
+            data[i] ^= p[i % p.length];
+        }
+    }
+
+    private static void makeEndMessage(byte[] data, long length, String password) {
+        int index = data.length - 24;
+        data[index] = (byte) 0xFF;
+        data[index + 1] = (byte) 0x00;
+        byte[] end = ByteUtil.long2Bytes(length, 4);
+        data[index + 2] = end[0];
+        data[index + 3] = end[1];
+        data[index + 4] = end[2];
+        data[index + 5] = end[3];
+    }
+
+    private static void clearData(byte[] data) {
+        for (int i = 0; i < data.length; i++) {
+            data[i] = 0;
+        }
+    }
+
+    private static void fillPixels(byte[] temp, int readSize, int[] array) {
         for (int i = 0; i < array.length; i++) {
             array[i] = ((255 & 0xFF) << 24) | (((temp[i * 3]) & 0xFF) << 16) | (((temp[i * 3 + 1]) & 0xFF) << 8) | (((temp[i * 3 + 2]) & 0xFF) << 0);
         }
     }
 
-    private static void fillImageHead(int[] array, int index, long length) {
-        byte[] fileHead = new byte[12];
 
-
-        ByteBuffer byteBuffer = ByteBuffer.allocate(4);
-        byteBuffer.putInt(index);
-        byte[] temp = byteBuffer.array();
-        for (int i = 0; i < temp.length; i++) {
-            fileHead[i] = temp[i];
-        }
-
-        byteBuffer = ByteBuffer.allocate(8);
-        byteBuffer.putLong(length);
-        temp = byteBuffer.array();
-        for (int i = 0; i < temp.length; i++) {
-            fileHead[i + 4] = temp[i];
-        }
-        for (int i = 0; i < 4; i++) {
-            array[i] = ((255 & 0xFF) << 24) | (((fileHead[i * 3]) & 0xFF) << 16) | (((fileHead[i * 3 + 1]) & 0xFF) << 8) | (((fileHead[i * 3 + 2]) & 0xFF) << 0);
-        }
-    }
-
-    public static File merge(SplitList splitList, File baseDir, String prefix) throws IOException {
-        File target = new File(baseDir.getAbsolutePath() + File.separator + prefix + splitList.getSourceName());
-        FileOutputStream outputStream = new FileOutputStream(target);
-        for (SplitItem item : splitList.getItemList()) {
-            File image = new File(baseDir.getAbsolutePath() + File.separator + item.getName());
-            boolean status = constructFile(outputStream, image,item.getLength());
-        }
-        outputStream.flush();
-        outputStream.close();
-        return target;
-    }
-
-    private static boolean constructFile(FileOutputStream outputStream, File image, long length) throws IOException {
-        BufferedImage bufferedImage = ImageIO.read(image);
-        int width = bufferedImage.getWidth();
-        int[] array = new int[width];
-        byte[] temp = new byte[width * 3];
-//        bufferedImage.getRGB(0, 0, width, 1, array, 0, width);
-//        long length = getFileLength(array);
-        long offset = 0;
-        for (int i = 0; i < bufferedImage.getHeight(); i++) {
-            bufferedImage.getRGB(0, i, width, 1, array, 0, width);
-            loadFileLine(array, temp);
-            if (length - offset > temp.length) {
-                offset += temp.length;
-                outputStream.write(temp);
-            } else if (length - offset == 0) {
-                break;
-            } else {
-                outputStream.write(temp, 0, (int) (length - offset));
-                break;
+    public static Result merge(SplitList splitList, File dir, File targetFile) {
+        try {
+            List<SplitItem> splitItems = splitList.getItemList();
+            if (targetFile.exists()) {
+                targetFile.delete();
             }
+            FileOutputStream fileOutputStream = new FileOutputStream(targetFile);
+            for (SplitItem item : splitItems) {
+                File itemFile = new File(dir, item.getName());
+                boolean ret = mergeItem(item, itemFile, fileOutputStream,splitList.getPassword());
+                if (!ret) {
+                    return null;
+                }
+            }
+            fileOutputStream.flush();
+            fileOutputStream.close();
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    private static boolean mergeItem(SplitItem item, File itemFile, FileOutputStream fileOutputStream, String password) throws IOException {
+        BufferedImage image = ImageIO.read(itemFile);
+        int imgWidth = image.getWidth();
+        long length = item.getLength();
+        int[] pixels = new int[imgWidth];
+        byte[] data = new byte[imgWidth * 3];
+        for (int i = 0; i < image.getHeight(); i++) {
+            image.getRGB(0, i, imgWidth, 1, pixels, 0, imgWidth);
+            int readSize = data.length;
+            if (i == image.getHeight() - 1) {
+                readSize = (int) (length - i * data.length);
+            }
+            fillData(data, pixels);
+            encodeData(data,password);
+            fileOutputStream.write(data, 0, readSize);
         }
         return true;
     }
 
-    private static void loadFileLine(int[] array, byte[] temp) {
+    private static void fillData(byte[] temp, int[] array) {
         for (int i = 0; i < array.length; i++) {
             temp[i * 3] = (byte) ((array[i] >> 16) & 0xFF);
             temp[i * 3 + 1] = (byte) ((array[i] >> 8) & 0xFF);
             temp[i * 3 + 2] = (byte) ((array[i] >> 0) & 0xFF);
         }
     }
-
-    private static long getFileLength(int[] array) {
-        byte[] bytes = new byte[8];
-        bytes[0] = (byte) (((array[1] >> 8) & 0xFF));
-        bytes[1] = (byte) (((array[1] >> 0) & 0xFF));
-        bytes[2] = (byte) (((array[2] >> 16) & 0xFF));
-        bytes[3] = (byte) (((array[2] >> 8) & 0xFF));
-        bytes[4] = (byte) (((array[2] >> 0) & 0xFF));
-        bytes[5] = (byte) (((array[3] >> 16) & 0xFF));
-        bytes[6] = (byte) (((array[3] >> 8) & 0xFF));
-        bytes[7] = (byte) (((array[3] >> 0) & 0xFF));
-        ByteBuffer byteBuffer = ByteBuffer.wrap(bytes);
-        return byteBuffer.getLong();
-    }
-
 }
